@@ -26,9 +26,9 @@ ALLOWED_ORIGINS = [
 ]
 
 # RFID Device Configuration
-RFID_HOST = os.getenv("RFID_HOST", "192.168.1.100")  # RFID device IP address
-RFID_PORT = int(os.getenv("RFID_PORT", "8080"))      # RFID device TCP port
+RFID_HOST = os.getenv("RFID_HOST", "192.168.22.10")  # RFID device IP address
+RFID_PORT = int(os.getenv("RFID_PORT", "2189"))      # RFID device TCP port
 RFID_TIMEOUT = int(os.getenv("RFID_TIMEOUT", "5"))   # Connection timeout in seconds
-RFID_SERVICE_ENABLED = os.getenv("RFID_SERVICE_ENABLED", "false").lower() == "true"  # Enable/disable background service
+RFID_SERVICE_ENABLED = os.getenv("RFID_SERVICE_ENABLED", "true").lower() == "true"  # Enable/disable background service
 RFID_READ_INTERVAL = int(os.getenv("RFID_READ_INTERVAL", "5"))  # Background service read interval in seconds
 

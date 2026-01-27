@@ -30,6 +30,15 @@ def create_cassette(db: Session, cassette: schemas.CassetteCreate):
     if existing:
         raise HTTPException(status_code=400, detail=f"Cassette with code '{cassette.cassette_code}' already exists")
     
+    # Check if RFID is already assigned to another cassette
+    if cassette.rfid_number:
+        existing_rfid = get_cassette_by_rfid(db, cassette.rfid_number)
+        if existing_rfid:
+            raise HTTPException(
+                status_code=409, 
+                detail=f"RFID '{cassette.rfid_number}' is already assigned to cassette '{existing_rfid.cassette_code}'"
+            )
+    
     try:
         db_cassette = models.CassetteMaster(**cassette.model_dump())
         db.add(db_cassette)
@@ -40,6 +49,7 @@ def create_cassette(db: Session, cassette: schemas.CassetteCreate):
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Database integrity error: {str(e)}")
 
+
 def update_cassette(db: Session, cassette_id: int, cassette: schemas.CassetteUpdate):
     """Update cassette"""
     db_cassette = get_cassette(db, cassette_id)
@@ -49,6 +59,15 @@ def update_cassette(db: Session, cassette_id: int, cassette: schemas.CassetteUpd
         existing = get_cassette_by_code(db, cassette.cassette_code)
         if existing:
             raise HTTPException(status_code=400, detail=f"Cassette with code '{cassette.cassette_code}' already exists")
+    
+    # Check if RFID is already assigned to another cassette
+    if cassette.rfid_number and cassette.rfid_number != db_cassette.rfid_number:
+        existing_rfid = get_cassette_by_rfid(db, cassette.rfid_number)
+        if existing_rfid and existing_rfid.id != cassette_id:
+            raise HTTPException(
+                status_code=409, 
+                detail=f"RFID '{cassette.rfid_number}' is already assigned to cassette '{existing_rfid.cassette_code}'"
+            )
     
     try:
         # Only update fields that are provided (not None)
@@ -62,6 +81,7 @@ def update_cassette(db: Session, cassette_id: int, cassette: schemas.CassetteUpd
     except IntegrityError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Database integrity error: {str(e)}")
+
 
 def delete_cassette(db: Session, cassette_id: int):
     """Delete cassette"""

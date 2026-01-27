@@ -49,21 +49,39 @@ def search_cassettes(
     return crud.search_cassettes(db, query)
 
 @router.post("/read-rfid")
-def read_rfid_from_device():
+def read_rfid_from_device(db: Session = Depends(get_db)):
     """
     Read RFID tag from RFID device
     Sends READ command to RFID device and returns the first tag detected
+    Also checks if the RFID is already assigned to another cassette
     """
     result = read_rfid_tag()
     
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['message'])
     
-    return {
+    rfid_number = result['rfid_number']
+    
+    # Check if this RFID is already assigned to a cassette
+    existing_cassette = crud.get_cassette_by_rfid(db, rfid_number)
+    
+    response = {
         "success": True,
-        "rfid_number": result['rfid_number'],
-        "message": result['message']
+        "rfid_number": rfid_number,
+        "message": result['message'],
+        "already_assigned": existing_cassette is not None
     }
+    
+    if existing_cassette:
+        response["assigned_to"] = {
+            "id": existing_cassette.id,
+            "cassette_code": existing_cassette.cassette_code,
+            "description": existing_cassette.desc
+        }
+        response["message"] = f"RFID already assigned to cassette '{existing_cassette.cassette_code}'"
+    
+    return response
+
 
 @router.post("/{cassette_id}/assign-rfid", response_model=schemas.CassetteResponse)
 def assign_rfid_to_cassette(

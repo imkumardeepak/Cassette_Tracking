@@ -100,10 +100,10 @@ python -c "from app.database import init_db; init_db()"
 ### Step 5: Run the Application
 ```bash
 # Development mode (auto-reload)
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8005
 
 # Or use the Python module directly
-python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8005
 ```
 
 ### Step 6: Access the Application
