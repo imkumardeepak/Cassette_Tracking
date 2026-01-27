@@ -27,6 +27,11 @@ class RFIDBackgroundService:
         self.read_count = 0
         self.error_count = 0
         
+        # GPIO auto-off tracking
+        self.active_output = None  # Currently active GPIO output
+        self.output_trigger_time = None  # When the output was triggered
+        self.output_duration = 5  # Seconds to keep output HIGH
+        
         # Initialize GPIO controller
         gpio_controller.initialize()
         
@@ -51,9 +56,29 @@ class RFIDBackgroundService:
                 self.error_count += 1
                 await asyncio.sleep(self.read_interval)
     
+    async def _check_and_auto_off_output(self):
+        """Check if active output should be turned off (after 5 seconds)"""
+        if self.active_output and self.output_trigger_time:
+            elapsed = (datetime.now() - self.output_trigger_time).total_seconds()
+            if elapsed >= self.output_duration:
+                # Turn off the output
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    gpio_controller.set_output,
+                    self.active_output,
+                    0  # LOW
+                )
+                logger.info(f"⏱️ GPIO {self.active_output} auto-OFF after {self.output_duration}s")
+                self.active_output = None
+                self.output_trigger_time = None
+    
     async def _read_and_process(self):
         """Read RFID tag and process it"""
         try:
+            # Check if we need to auto-turn-off the output
+            await self._check_and_auto_off_output()
+            
             # Run blocking RFID read in executor to avoid blocking event loop
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, read_rfid_tag)
@@ -70,14 +95,48 @@ class RFIDBackgroundService:
                     self.last_rfid = rfid_number
                     self.last_read_time = current_time
                     
+                    # Turn off previous output before triggering new one
+                    if self.active_output:
+                        await loop.run_in_executor(
+                            None,
+                            gpio_controller.set_output,
+                            self.active_output,
+                            0  # LOW
+                        )
+                        logger.info(f"🔄 GPIO {self.active_output} OFF (new RFID detected)")
+                    
                     # Trigger GPIO output based on RFID
                     triggered_output = await self._trigger_gpio(rfid_number)
                     
+                    # Track the active output for auto-off
+                    if triggered_output:
+                        self.active_output = triggered_output
+                        self.output_trigger_time = current_time
+                    
                     # Process RFID (log transaction, send notifications)
                     await self._on_rfid_detected(rfid_number, triggered_output)
+                else:
+                    # Same RFID still present - reset the auto-off timer
+                    if self.active_output:
+                        self.output_trigger_time = current_time
                     
             else:
-                # No tag or error - only log occasionally to avoid spam
+                # No tag detected - turn off all outputs
+                if self.active_output:
+                    await loop.run_in_executor(
+                        None,
+                        gpio_controller.set_output,
+                        self.active_output,
+                        0  # LOW
+                    )
+                    logger.info(f"📴 GPIO {self.active_output} OFF (no RFID tag)")
+                    self.active_output = None
+                    self.output_trigger_time = None
+                
+                # Clear last RFID when no tag present
+                self.last_rfid = None
+                
+                # Only log occasionally to avoid spam
                 if self.read_count % 12 == 0:  # Log every minute (12 * 5 seconds)
                     logger.debug(f"RFID reader status: {result['message']}")
                     
@@ -266,6 +325,12 @@ class RFIDBackgroundService:
         """Get service status"""
         gpio_status = gpio_controller.get_status()
         
+        # Calculate remaining time if output is active
+        remaining_seconds = None
+        if self.active_output and self.output_trigger_time:
+            elapsed = (datetime.now() - self.output_trigger_time).total_seconds()
+            remaining_seconds = max(0, self.output_duration - elapsed)
+        
         return {
             "is_running": self.is_running,
             "read_interval": self.read_interval,
@@ -273,6 +338,9 @@ class RFIDBackgroundService:
             "error_count": self.error_count,
             "last_rfid": self.last_rfid,
             "last_read_time": self.last_read_time.isoformat() if self.last_read_time else None,
+            "active_output": self.active_output,
+            "output_duration": self.output_duration,
+            "output_remaining_seconds": remaining_seconds,
             "gpio": gpio_status
         }
 
