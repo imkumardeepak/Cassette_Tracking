@@ -258,6 +258,14 @@ async def delete_production_log(log_id: int, db: Session = Depends(get_db)):
     """Delete a production log"""
     return crud.delete_production_log(db, log_id)
 
+@app.delete("/api/cleanup-logs-and-transactions", tags=["System Maintenance"])
+async def cleanup_database(db: Session = Depends(get_db)):
+    """
+    WARNING: This endpoint will delete ALL Production Logs and RFID Transactions.
+    It is intended for development and cleanup purposes.
+    """
+    return crud.truncate_logs_and_transactions(db)
+
 
 if __name__ == "__main__":
     import uvicorn

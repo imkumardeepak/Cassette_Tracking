@@ -241,3 +241,15 @@ def delete_production_log(db: Session, log_id: int):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting production log: {str(e)}")
 
+
+# ============= Cleanup CRUD =============
+def truncate_logs_and_transactions(db: Session):
+    """Truncate production logs and transactions tables"""
+    try:
+        db.query(models.ProductionLog).delete()
+        db.query(models.RFIDTransaction).delete()
+        db.commit()
+        return {"message": "Successfully cleared production logs and transactions"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error clearing data: {str(e)}")

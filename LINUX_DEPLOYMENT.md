@@ -26,19 +26,6 @@ Complete guide for deploying the Cassette & RFID Tracking System on Linux server
 - **Python**: 3.8 or higher
 - **User**: Non-root user with sudo privileges
 
-### Install Python and Dependencies
-
-#### Ubuntu/Debian
-```bash
-sudo apt update
-sudo apt install -y python3 python3-pip python3-venv git
-```
-
-#### CentOS/RHEL
-```bash
-sudo yum update -y
-sudo yum install -y python3 python3-pip git
-```
 
 ### Verify Installation
 ```bash
@@ -56,7 +43,7 @@ pip3 --version
 
 **Option A: Using Git**
 ```bash
-cd /home/yourusername
+cd /home/atcpl
 git clone <your-repository-url>
 cd Cassette_Tracking
 ```
@@ -64,7 +51,7 @@ cd Cassette_Tracking
 **Option B: Using SCP (from Windows)**
 ```bash
 # From Windows PowerShell
-scp -r d:\PROJECT\HINDALCO\Cassette_Tracking username@server-ip:/home/username/
+scp -r d:\PROJECT\HINDALCO\Cassette_Tracking atcpl@192.168.0.1:/home/atcpl/
 ```
 
 **Option C: Using SFTP**
@@ -73,12 +60,20 @@ scp -r d:\PROJECT\HINDALCO\Cassette_Tracking username@server-ip:/home/username/
 # Upload the entire Cassette_Tracking folder
 ```
 
+
+
+### Change permissions
+```bash
+chmod -R 777 /home/atcpl/Cassette_Tracking
+chown -R atcpl:atcpl /home/atcpl/Cassette_Tracking
+chown -R atcpl:atcpl /home/atcpl/Cassette_Tracking
+chmod -R 777 /home/atcpl/Cassette_Tracking
+chmod -R 777 /home/atcpl/Cassette_Tracking/static
+chmod -R 777 /home/atcpl/Cassette_Tracking/database
+```
 ### Step 2: Set Up Virtual Environment
 ```bash
 cd /home/atcpl/Cassette_Tracking
-
-chmod -R 777 /home/atcpl/Cassette_Tracking
-chown -R atcpl:atcpl /home/atcpl/Cassette_Tracking
 
 # Create virtual environment
 python3 -m venv venv
@@ -153,13 +148,13 @@ After=network.target
 
 [Service]
 Type=notify
-User=yourusername
-Group=yourusername
-WorkingDirectory=/home/yourusername/Cassette_Tracking
-Environment="PATH=/home/yourusername/Cassette_Tracking/venv/bin"
+User=atcpl
+Group=atcpl
+WorkingDirectory=/home/atcpl/Cassette_Tracking
+Environment="PATH=/home/atcpl/Cassette_Tracking/venv/bin"
 
 # Production command with Gunicorn
-ExecStart=/home/yourusername/Cassette_Tracking/venv/bin/gunicorn \
+ExecStart=/home/atcpl/Cassette_Tracking/venv/bin/gunicorn \
     app.main:app \
     --workers 4 \
     --worker-class uvicorn.workers.UvicornWorker \
@@ -178,7 +173,7 @@ WantedBy=multi-user.target
 ### Step 4: Create Log Directory
 ```bash
 sudo mkdir -p /var/log/cassette-tracking
-sudo chown yourusername:yourusername /var/log/cassette-tracking
+sudo chown atcpl:atcpl /var/log/cassette-tracking
 ```
 
 ### Step 5: Enable and Start Service

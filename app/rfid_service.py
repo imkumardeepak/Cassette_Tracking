@@ -324,26 +324,26 @@ class RFIDBackgroundService:
                 new_log = crud.create_production_log(db, log_data)
                 log_id = new_log.id
                 logger.info(f"📋 Production log #{new_log.id} opened for cassette {cassette.cassette_code}")
+                
+                # 3. Create RFID transaction record ONLY ONCE per session switch
+                extra_info = {"desc": cassette.desc, "production_log_id": log_id}
+                if triggered_output:
+                    extra_info["relay_output"] = triggered_output
+                
+                transaction_data = schemas.RFIDTransactionCreate(
+                    rfid_number=rfid_number,
+                    cassette_id=cassette.id,
+                    cassette_code=cassette.cassette_code,
+                    event_type="scan",
+                    status="success",
+                    message=f"Cassette {cassette.cassette_code} scanned" + 
+                            (f" → {triggered_output} ON" if triggered_output else ""),
+                    extra_data=json.dumps(extra_info)
+                )
+                crud.create_rfid_transaction(db, transaction_data)
             else:
                 log_id = open_log.id
                 logger.info(f"📋 Keeping open production log #{log_id} active for cassette {cassette.cassette_code}")
-            
-            # 3. Create RFID transaction record
-            extra_info = {"desc": cassette.desc, "production_log_id": log_id}
-            if triggered_output:
-                extra_info["relay_output"] = triggered_output
-            
-            transaction_data = schemas.RFIDTransactionCreate(
-                rfid_number=rfid_number,
-                cassette_id=cassette.id,
-                cassette_code=cassette.cassette_code,
-                event_type="scan",
-                status="success",
-                message=f"Cassette {cassette.cassette_code} scanned" + 
-                        (f" → {triggered_output} ON" if triggered_output else ""),
-                extra_data=json.dumps(extra_info)
-            )
-            crud.create_rfid_transaction(db, transaction_data)
             
             # 4. Send WebSocket notifications
             await ws_manager.broadcast_rfid_scan(
