@@ -140,3 +140,104 @@ def get_recent_rfid_transactions(db: Session, limit: int = 10):
         models.RFIDTransaction.created_at.desc()
     ).limit(limit).all()
 
+
+# ============= Production Log CRUD =============
+
+def create_production_log(db: Session, log_data: schemas.ProductionLogCreate):
+    """Create a new production log entry (auto-created when new RFID detected)"""
+    try:
+        from datetime import datetime
+        db_log = models.ProductionLog(
+            cassette_id=log_data.cassette_id,
+            cassette_code=log_data.cassette_code,
+            rfid_number=log_data.rfid_number,
+            relay_output=log_data.relay_output,
+            from_date=log_data.from_date or datetime.now(),
+            status="open"
+        )
+        db.add(db_log)
+        db.commit()
+        db.refresh(db_log)
+        return db_log
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating production log: {str(e)}")
+
+
+def close_open_production_logs(db: Session):
+    """Close all currently open production logs (set to_date = now, status = closed)"""
+    from datetime import datetime
+    open_logs = db.query(models.ProductionLog).filter(
+        models.ProductionLog.status == "open"
+    ).all()
+    
+    for log in open_logs:
+        log.to_date = datetime.now()
+        log.status = "closed"
+    
+    db.commit()
+    return len(open_logs)
+
+
+def update_production_log(db: Session, log_id: int, log_data: schemas.ProductionLogUpdate):
+    """Update production log with user-entered data (sheet_length_cut, coil_length_run)"""
+    db_log = db.query(models.ProductionLog).filter(models.ProductionLog.id == log_id).first()
+    if not db_log:
+        raise HTTPException(status_code=404, detail=f"Production log with id {log_id} not found")
+        
+    if db_log.status == "open":
+        raise HTTPException(
+            status_code=400, 
+            detail="Cannot update data for an active cassette session. Wait until the cassette is changed."
+        )    
+    try:
+        update_data = log_data.model_dump(exclude_unset=True)
+        for key, value in update_data.items():
+            setattr(db_log, key, value)
+        
+        db.commit()
+        db.refresh(db_log)
+        return db_log
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error updating production log: {str(e)}")
+
+
+def get_production_logs(db: Session, skip: int = 0, limit: int = 50):
+    """Get all production logs, open ones first, then by from_date descending"""
+    total = db.query(models.ProductionLog).count()
+    items = db.query(models.ProductionLog).order_by(
+        models.ProductionLog.status.asc(),  # 'open' before 'closed'
+        models.ProductionLog.from_date.desc()
+    ).offset(skip).limit(limit).all()
+    return {"total": total, "items": items}
+
+
+def get_production_log(db: Session, log_id: int):
+    """Get a single production log by ID"""
+    log = db.query(models.ProductionLog).filter(models.ProductionLog.id == log_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail=f"Production log with id {log_id} not found")
+    return log
+
+
+def get_open_production_log(db: Session):
+    """Get the currently open production log (if any)"""
+    return db.query(models.ProductionLog).filter(
+        models.ProductionLog.status == "open"
+    ).first()
+
+
+def delete_production_log(db: Session, log_id: int):
+    """Delete a production log"""
+    db_log = db.query(models.ProductionLog).filter(models.ProductionLog.id == log_id).first()
+    if not db_log:
+        raise HTTPException(status_code=404, detail=f"Production log with id {log_id} not found")
+    try:
+        db.delete(db_log)
+        db.commit()
+        return {"message": "Production log deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting production log: {str(e)}")
+

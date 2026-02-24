@@ -1,132 +1,137 @@
 """
-GPIO Controller for Cygnus Board
-Controls digital outputs based on RFID scans
+Modbus RTU Relay Controller for Cygnus Board
+Controls relay outputs via RS-485 Modbus RTU protocol
+
+Modbus Register Map:
+  Address 0x0002 | RELAY_STATE | Read: FC 0x01, Write: FC 0x05
+  Relay Outputs 1-10 (bitwise: bit 0 = Relay1)
+  
+  RELAY1 -> coil address 0x0002
+  RELAY2 -> coil address 0x0003
+  ...
+  RELAY8 -> coil address 0x0009
 """
 
 import os
 import logging
+import platform
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 # ==========================
-# GPIO Mapping for Cygnus Board
+# Relay Output Mapping (Modbus Coils)
 # ==========================
+# Base coil address for relays (from Modbus register map)
+RELAY_BASE_ADDRESS = 0x0002
 
-# Digital Outputs (DO0-DO3)
-GPIO_OUTPUTS = {
-    "DO0": 403,  # GPIO 18 → 385 + 18 = 403
-    "DO1": 404,  # GPIO 19 → 385 + 19 = 404
-    "DO2": 378,  # PM_GPIO 4 → 374 + 4 = 378
-    "DO3": 382,  # PM_GPIO 8 → 374 + 8 = 382
+# 8 Relay outputs: RELAY1-RELAY8
+# Each relay maps to a sequential coil address starting from RELAY_BASE_ADDRESS
+RELAY_OUTPUTS = {
+    f"RELAY{i}": RELAY_BASE_ADDRESS + (i - 1) for i in range(1, 9)
 }
-
-# Digital Inputs (DI0-DI2) - for future use
-GPIO_INPUTS = {
-    "DI0": 417,  # GPIO 32 → 385 + 32 = 417
-    "DI1": 418,  # GPIO 33 → 385 + 33 = 418
-    "DI2": 420,  # GPIO 35 → 385 + 35 = 420
-}
+# Result: {"RELAY1": 2, "RELAY2": 3, "RELAY3": 4, ..., "RELAY8": 9}
 
 
-class GPIOController:
+class RelayController:
     """
-    GPIO Controller for Cygnus Board
-    Maps RFID numbers to GPIO outputs
+    Modbus RTU Relay Controller
+    Controls relay outputs via RS-485 serial connection (Cygnus Board)
+    
+    Communication:
+      - Protocol: Modbus RTU over RS-485
+      - Serial Port: /dev/ttyHS2 (configurable)
+      - Baud Rate: 9600 (configurable)
+      - Read Relay: Function Code 0x01 (Read Coils)
+      - Write Relay: Function Code 0x05 (Write Single Coil)
     """
     
     def __init__(self):
-        self.rfid_to_output_map: Dict[str, str] = {}  # RFID number → Output name (DO0, DO1, etc.)
-        self.output_states: Dict[str, int] = {name: 0 for name in GPIO_OUTPUTS}
+        self.client = None
+        self.rfid_to_output_map: Dict[str, str] = {}  # RFID number -> Relay name
+        self.output_states: Dict[str, int] = {name: 0 for name in RELAY_OUTPUTS}
         self.initialized = False
-        self.simulation_mode = True  # Set to False when running on actual hardware
+        self.simulation_mode = True
+        self.slave_id = 1
         
     def initialize(self):
-        """Initialize all GPIO pins"""
+        """Initialize Modbus RTU connection to relay board"""
         if self.initialized:
             return
             
-        logger.info("🔧 Initializing GPIO Controller...")
+        logger.info("🔧 Initializing Modbus RTU Relay Controller...")
         
-        # Check if running on Linux with GPIO support
-        if not os.path.exists("/sys/class/gpio"):
-            logger.warning("⚠️ GPIO not available - running in simulation mode")
+        import config
+        
+        # Check if running on Linux with serial port available
+        is_linux = platform.system() == "Linux"
+        serial_port_exists = os.path.exists(config.MODBUS_PORT)
+        
+        if not is_linux or not serial_port_exists:
+            logger.warning(f"⚠️ Modbus serial port ({config.MODBUS_PORT}) not available - running in simulation mode")
             self.simulation_mode = True
             self.initialized = True
             return
             
         self.simulation_mode = False
+        self.slave_id = config.MODBUS_SLAVE_ID
         
         try:
-            # Export and configure all output pins
-            for name, pin in GPIO_OUTPUTS.items():
-                self._export_gpio(pin)
-                self._set_direction(pin, "out")
-                self._write_gpio(pin, 0)  # Initialize to LOW
-                logger.info(f"✅ Initialized {name} (GPIO {pin}) as OUTPUT")
-                
-            self.initialized = True
-            logger.info("✅ GPIO Controller initialized successfully")
+            from pymodbus.client import ModbusSerialClient
             
+            self.client = ModbusSerialClient(
+                port=config.MODBUS_PORT,
+                baudrate=config.MODBUS_BAUDRATE,
+                parity=config.MODBUS_PARITY,
+                stopbits=config.MODBUS_STOPBITS,
+                bytesize=config.MODBUS_BYTESIZE,
+                timeout=config.MODBUS_TIMEOUT
+            )
+            
+            connected = self.client.connect()
+            if connected:
+                logger.info(f"✅ Connected to Modbus relay board on {config.MODBUS_PORT}")
+                logger.info(f"   Slave ID: {self.slave_id}, Baud: {config.MODBUS_BAUDRATE}, Parity: {config.MODBUS_PARITY}")
+                
+                # Read current relay states from device
+                self.read_relay_states()
+                
+                # Reset all relays on init
+                self.reset_all_outputs()
+                self.initialized = True
+                logger.info(f"✅ Relay Controller initialized ({len(RELAY_OUTPUTS)} outputs: RELAY1-RELAY8)")
+            else:
+                logger.error(f"❌ Failed to connect to Modbus device on {config.MODBUS_PORT}")
+                self.simulation_mode = True
+                self.initialized = True
+                
+        except ImportError:
+            logger.error("❌ pymodbus not installed. Run: pip install pymodbus pyserial")
+            self.simulation_mode = True
+            self.initialized = True
         except Exception as e:
-            logger.error(f"❌ Failed to initialize GPIO: {e}")
+            logger.error(f"❌ Failed to initialize Modbus: {e}")
             self.simulation_mode = True
             self.initialized = True
     
-    def _export_gpio(self, pin: int):
-        """Export GPIO so it becomes available in /sys/class/gpio/"""
-        if not os.path.exists(f"/sys/class/gpio/gpio{pin}"):
-            try:
-                with open("/sys/class/gpio/export", "w") as f:
-                    f.write(str(pin))
-            except Exception as e:
-                logger.debug(f"GPIO {pin} export: {e}")
-    
-    def _set_direction(self, pin: int, direction: str):
-        """Set GPIO direction: 'in' or 'out'"""
-        try:
-            with open(f"/sys/class/gpio/gpio{pin}/direction", "w") as f:
-                f.write(direction)
-        except Exception as e:
-            logger.error(f"Failed to set GPIO {pin} direction: {e}")
-            raise
-    
-    def _read_gpio(self, pin: int) -> int:
-        """Read GPIO input value and return 0/1"""
-        try:
-            with open(f"/sys/class/gpio/gpio{pin}/value", "r") as f:
-                return int(f.read().strip())
-        except Exception as e:
-            logger.error(f"Failed to read GPIO {pin}: {e}")
-            return 0
-    
-    def _write_gpio(self, pin: int, value: int):
-        """Write 1 or 0 to output"""
-        try:
-            with open(f"/sys/class/gpio/gpio{pin}/value", "w") as f:
-                f.write("1" if value else "0")
-        except Exception as e:
-            logger.error(f"Failed to write GPIO {pin}: {e}")
-            raise
-    
     def configure_rfid_mapping(self, rfid_number: str, output_name: str):
         """
-        Map an RFID number to a specific output (in-memory mapping)
+        Map an RFID number to a specific relay output (in-memory)
         Note: For persistent mapping, use the gpio_output field in CassetteMaster
         
         Args:
             rfid_number: The RFID tag number
-            output_name: Output name (DO0, DO1, DO2, DO3)
+            output_name: Relay name (RELAY1-RELAY8)
         """
-        if output_name not in GPIO_OUTPUTS:
-            raise ValueError(f"Invalid output name: {output_name}. Valid options: {list(GPIO_OUTPUTS.keys())}")
+        if output_name not in RELAY_OUTPUTS:
+            raise ValueError(f"Invalid relay: {output_name}. Valid options: {list(RELAY_OUTPUTS.keys())}")
             
         self.rfid_to_output_map[rfid_number] = output_name
         logger.info(f"🔗 Mapped RFID {rfid_number} → {output_name}")
     
     def load_mappings_from_db(self):
         """
-        Load RFID-GPIO mappings from database (CassetteMaster table)
+        Load RFID-Relay mappings from database (CassetteMaster table)
         Returns the mapping dictionary
         """
         from app.database import SessionLocal
@@ -148,7 +153,7 @@ class GPIOController:
                     self.rfid_to_output_map[cassette.rfid_number] = cassette.gpio_output
                     logger.debug(f"Loaded mapping: {cassette.rfid_number} → {cassette.gpio_output}")
             
-            logger.info(f"📂 Loaded {len(self.rfid_to_output_map)} RFID-GPIO mappings from database")
+            logger.info(f"📂 Loaded {len(self.rfid_to_output_map)} RFID-Relay mappings from database")
             return self.rfid_to_output_map.copy()
             
         except Exception as e:
@@ -157,16 +162,16 @@ class GPIOController:
         finally:
             db.close()
     
-    def get_output_for_rfid(self, rfid_number: str) -> str:
+    def get_output_for_rfid(self, rfid_number: str) -> Optional[str]:
         """
-        Get the GPIO output for a given RFID number
+        Get the relay output for a given RFID number
         First checks in-memory cache, then loads from database if not found
         
         Args:
             rfid_number: The RFID tag number
             
         Returns:
-            Output name (DO0, DO1, DO2, DO3) or None
+            Relay name (RELAY1-RELAY8) or None
         """
         # Check in-memory cache first
         if rfid_number in self.rfid_to_output_map:
@@ -188,7 +193,7 @@ class GPIOController:
                 return cassette.gpio_output
                 
         except Exception as e:
-            logger.error(f"Error getting GPIO mapping for RFID: {e}")
+            logger.error(f"Error getting relay mapping for RFID: {e}")
         finally:
             db.close()
         
@@ -196,88 +201,133 @@ class GPIOController:
     
     def set_output(self, output_name: str, value: int) -> bool:
         """
-        Set a specific output HIGH or LOW
+        Set a relay output ON or OFF via Modbus coil write (FC 0x05)
         
         Args:
-            output_name: Output name (DO0, DO1, DO2, DO3)
-            value: 1 for HIGH, 0 for LOW
+            output_name: Relay name (RELAY1-RELAY8)
+            value: 1 for ON, 0 for OFF
             
         Returns:
             True if successful, False otherwise
         """
-        if output_name not in GPIO_OUTPUTS:
-            logger.error(f"Invalid output: {output_name}")
+        if output_name not in RELAY_OUTPUTS:
+            logger.error(f"Invalid relay: {output_name}. Valid: {list(RELAY_OUTPUTS.keys())}")
             return False
             
-        pin = GPIO_OUTPUTS[output_name]
+        coil_address = RELAY_OUTPUTS[output_name]
         
         if self.simulation_mode:
-            logger.info(f"🔌 [SIMULATION] {output_name} (GPIO {pin}) → {'HIGH' if value else 'LOW'}")
+            logger.info(f"🔌 [SIMULATION] {output_name} (coil 0x{coil_address:04X}) → {'ON' if value else 'OFF'}")
             self.output_states[output_name] = value
             return True
             
         try:
-            self._write_gpio(pin, value)
+            # Write single coil (FC 0x05)
+            result = self.client.write_coil(
+                address=coil_address,
+                value=bool(value),
+                slave=self.slave_id
+            )
+            
+            if result.isError():
+                logger.error(f"Modbus error setting {output_name}: {result}")
+                return False
+                
             self.output_states[output_name] = value
-            logger.info(f"🔌 {output_name} (GPIO {pin}) → {'HIGH' if value else 'LOW'}")
+            logger.info(f"🔌 {output_name} (coil 0x{coil_address:04X}) → {'ON' if value else 'OFF'}")
             return True
+            
         except Exception as e:
             logger.error(f"Failed to set {output_name}: {e}")
             return False
     
+    def read_relay_states(self) -> Dict[str, int]:
+        """
+        Read current state of all relays from the device via Modbus (FC 0x01)
+        
+        Returns:
+            Dictionary of relay states {RELAY1: 0/1, RELAY2: 0/1, ...}
+        """
+        if self.simulation_mode:
+            return self.output_states.copy()
+            
+        try:
+            # Read coils starting from base address (FC 0x01)
+            result = self.client.read_coils(
+                address=RELAY_BASE_ADDRESS,
+                count=len(RELAY_OUTPUTS),
+                slave=self.slave_id
+            )
+            
+            if result.isError():
+                logger.error(f"Modbus error reading relays: {result}")
+                return self.output_states.copy()
+                
+            # Update internal state from device
+            for i, name in enumerate(RELAY_OUTPUTS):
+                self.output_states[name] = 1 if result.bits[i] else 0
+                
+            logger.debug(f"Read relay states: {self.output_states}")
+            return self.output_states.copy()
+            
+        except Exception as e:
+            logger.error(f"Error reading relay states: {e}")
+            return self.output_states.copy()
+    
     def on_rfid_scanned(self, rfid_number: str) -> Optional[str]:
         """
-        Handle RFID scan - set corresponding output to HIGH
+        Handle RFID scan - set corresponding relay to ON
         
         Args:
             rfid_number: The scanned RFID number
             
         Returns:
-            The output name that was triggered, or None if no mapping exists
+            The relay name that was triggered, or None if no mapping exists
         """
         if not self.initialized:
             self.initialize()
             
         # Check if this RFID has a mapping
-        if rfid_number in self.rfid_to_output_map:
-            output_name = self.rfid_to_output_map[rfid_number]
-            
-            # Reset all outputs first (optional - remove if you want multiple outputs active)
-            # for name in GPIO_OUTPUTS:
-            #     self.set_output(name, 0)
-            
-            # Set the mapped output to HIGH
+        output_name = self.get_output_for_rfid(rfid_number)
+        if output_name:
             success = self.set_output(output_name, 1)
-            
             if success:
-                logger.info(f"📡 RFID {rfid_number} triggered {output_name} → HIGH")
+                logger.info(f"📡 RFID {rfid_number} triggered {output_name} → ON")
                 return output_name
         else:
-            logger.debug(f"No GPIO mapping for RFID: {rfid_number}")
+            logger.debug(f"No relay mapping for RFID: {rfid_number}")
             
         return None
     
     def reset_all_outputs(self):
-        """Reset all outputs to LOW"""
-        for name in GPIO_OUTPUTS:
+        """Turn OFF all relay outputs"""
+        for name in RELAY_OUTPUTS:
             self.set_output(name, 0)
-        logger.info("🔄 All outputs reset to LOW")
+        logger.info("🔄 All relays reset to OFF")
     
     def get_status(self) -> Dict:
-        """Get current GPIO status"""
+        """Get current relay controller status"""
         return {
             "initialized": self.initialized,
             "simulation_mode": self.simulation_mode,
+            "connection_type": "Modbus RTU (RS-485)",
+            "slave_id": self.slave_id,
             "outputs": self.output_states.copy(),
             "rfid_mappings": self.rfid_to_output_map.copy(),
-            "available_outputs": list(GPIO_OUTPUTS.keys()),
+            "available_outputs": list(RELAY_OUTPUTS.keys()),
         }
     
     def cleanup(self):
-        """Cleanup GPIO on shutdown"""
-        logger.info("🛑 Cleaning up GPIO...")
+        """Cleanup on shutdown - turn off all relays and close connection"""
+        logger.info("🛑 Cleaning up Modbus relay controller...")
         self.reset_all_outputs()
+        if self.client:
+            try:
+                self.client.close()
+                logger.info("🔌 Modbus connection closed")
+            except:
+                pass
 
 
-# Global GPIO controller instance
-gpio_controller = GPIOController()
+# Global controller instance (same variable name for backward compatibility)
+gpio_controller = RelayController()

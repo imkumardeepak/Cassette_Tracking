@@ -128,11 +128,11 @@ async def get_rfid_service_status():
 @app.post("/api/gpio/mapping")
 async def configure_gpio_mapping(rfid_number: str, output_name: str):
     """
-    Configure RFID to GPIO output mapping
+    Configure RFID to Relay output mapping
     
     Args:
         rfid_number: The RFID tag number
-        output_name: Output name (DO0, DO1, DO2, DO3)
+        output_name: Relay name (RELAY1-RELAY8)
     """
     try:
         rfid_service.configure_rfid_gpio_mapping(rfid_number, output_name)
@@ -147,18 +147,18 @@ async def configure_gpio_mapping(rfid_number: str, output_name: str):
 
 @app.get("/api/gpio/status")
 async def get_gpio_status():
-    """Get GPIO controller status and current output states"""
+    """Get relay controller status and current output states"""
     from app.gpio_controller import gpio_controller
     return gpio_controller.get_status()
 
 @app.post("/api/gpio/output/{output_name}")
 async def set_gpio_output(output_name: str, value: int):
     """
-    Manually set a GPIO output
+    Manually set a relay output
     
     Args:
-        output_name: Output name (DO0, DO1, DO2, DO3)
-        value: 1 for HIGH, 0 for LOW
+        output_name: Relay name (RELAY1-RELAY8)
+        value: 1 for ON, 0 for OFF
     """
     from app.gpio_controller import gpio_controller
     
@@ -170,17 +170,17 @@ async def set_gpio_output(output_name: str, value: int):
     if success:
         return {
             "success": True,
-            "message": f"{output_name} set to {'HIGH' if value else 'LOW'}"
+            "message": f"{output_name} set to {'ON' if value else 'OFF'}"
         }
     else:
         raise HTTPException(status_code=400, detail=f"Failed to set {output_name}")
 
 @app.post("/api/gpio/reset")
 async def reset_all_gpio():
-    """Reset all GPIO outputs to LOW"""
+    """Reset all relay outputs to OFF"""
     from app.gpio_controller import gpio_controller
     gpio_controller.reset_all_outputs()
-    return {"success": True, "message": "All outputs reset to LOW"}
+    return {"success": True, "message": "All relay outputs reset to OFF"}
 
 # WebSocket endpoint for real-time RFID notifications
 @app.websocket("/ws/rfid")
@@ -227,6 +227,36 @@ async def get_transactions_by_rfid(
     """Get all transactions for a specific RFID"""
     transactions = crud.get_rfid_transactions_by_rfid(db, rfid_number)
     return transactions
+
+
+# Production Log endpoints
+@app.get("/api/production-logs", response_model=schemas.ProductionLogListResponse)
+async def get_production_logs(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Get all production logs with pagination (open logs first)"""
+    return crud.get_production_logs(db, skip=skip, limit=limit)
+
+@app.get("/api/production-logs/{log_id}", response_model=schemas.ProductionLogResponse)
+async def get_production_log(log_id: int, db: Session = Depends(get_db)):
+    """Get a specific production log by ID"""
+    return crud.get_production_log(db, log_id)
+
+@app.put("/api/production-logs/{log_id}", response_model=schemas.ProductionLogResponse)
+async def update_production_log(
+    log_id: int,
+    log_data: schemas.ProductionLogUpdate,
+    db: Session = Depends(get_db)
+):
+    """Update production log with sheet length cut and coil length run"""
+    return crud.update_production_log(db, log_id, log_data)
+
+@app.delete("/api/production-logs/{log_id}")
+async def delete_production_log(log_id: int, db: Session = Depends(get_db)):
+    """Delete a production log"""
+    return crud.delete_production_log(db, log_id)
 
 
 if __name__ == "__main__":

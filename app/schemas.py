@@ -22,7 +22,7 @@ class CassetteBase(BaseModel):
 
 class CassetteCreate(CassetteBase):
     rfid_number: Optional[str] = Field(None, max_length=100, description="RFID number (optional, can be updated later)")
-    gpio_output: Optional[str] = Field(None, max_length=10, description="GPIO output: DO0, DO1, DO2, DO3")
+    gpio_output: Optional[str] = Field(None, max_length=10, description="Relay output: RELAY1-RELAY8")
     
     @validator('rfid_number')
     def validate_rfid_number(cls, v):
@@ -32,9 +32,9 @@ class CassetteCreate(CassetteBase):
     
     @validator('gpio_output')
     def validate_gpio_output(cls, v):
-        valid_outputs = ['DO0', 'DO1', 'DO2', 'DO3', None, '']
-        if v is not None and v.strip() and v.strip().upper() not in ['DO0', 'DO1', 'DO2', 'DO3']:
-            raise ValueError('GPIO output must be DO0, DO1, DO2, or DO3')
+        valid_outputs = [f'RELAY{i}' for i in range(1, 9)]
+        if v is not None and v.strip() and v.strip().upper() not in valid_outputs:
+            raise ValueError('Relay output must be RELAY1 through RELAY8')
         return v.strip().upper() if v and v.strip() else None
 
 class CassetteUpdate(BaseModel):
@@ -51,8 +51,9 @@ class CassetteUpdate(BaseModel):
     
     @validator('gpio_output')
     def validate_gpio_output(cls, v):
-        if v is not None and v.strip() and v.strip().upper() not in ['DO0', 'DO1', 'DO2', 'DO3']:
-            raise ValueError('GPIO output must be DO0, DO1, DO2, or DO3')
+        valid_outputs = [f'RELAY{i}' for i in range(1, 9)]
+        if v is not None and v.strip() and v.strip().upper() not in valid_outputs:
+            raise ValueError('Relay output must be RELAY1 through RELAY8')
         return v.strip().upper() if v and v.strip() else None
 
 class CassetteResponse(BaseModel):
@@ -102,6 +103,44 @@ class RFIDTransactionResponse(BaseModel):
 class RFIDTransactionListResponse(BaseModel):
     total: int
     items: List[RFIDTransactionResponse]
+
+
+
+# ============= Production Log Schemas =============
+
+class ProductionLogCreate(BaseModel):
+    """Auto-created by RFID service when a new cassette/RFID is detected"""
+    cassette_id: Optional[int] = None
+    cassette_code: Optional[str] = None
+    rfid_number: str
+    relay_output: Optional[str] = None
+    from_date: Optional[datetime] = None
+
+class ProductionLogUpdate(BaseModel):
+    """User updates sheet_length_cut and coil_length_run"""
+    sheet_length_cut: Optional[float] = Field(None, ge=0, description="Total sheet length cut")
+    coil_length_run: Optional[float] = Field(None, ge=0, description="Total coil length run")
+
+class ProductionLogResponse(BaseModel):
+    id: int
+    cassette_id: Optional[int] = None
+    cassette_code: Optional[str] = None
+    rfid_number: str
+    from_date: datetime
+    to_date: Optional[datetime] = None
+    sheet_length_cut: Optional[float] = None
+    coil_length_run: Optional[float] = None
+    relay_output: Optional[str] = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class ProductionLogListResponse(BaseModel):
+    total: int
+    items: List[ProductionLogResponse]
 
 
 # ============= Generic Response Schemas =============

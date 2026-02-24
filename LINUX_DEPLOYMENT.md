@@ -75,7 +75,10 @@ scp -r d:\PROJECT\HINDALCO\Cassette_Tracking username@server-ip:/home/username/
 
 ### Step 2: Set Up Virtual Environment
 ```bash
-cd /home/yourusername/Cassette_Tracking
+cd /home/atcpl/Cassette_Tracking
+
+chmod -R 777 /home/atcpl/Cassette_Tracking
+chown -R atcpl:atcpl /home/atcpl/Cassette_Tracking
 
 # Create virtual environment
 python3 -m venv venv
@@ -454,11 +457,11 @@ ALLOWED_ORIGINS = [
 ### 2. Set File Permissions
 ```bash
 # Set proper ownership
-sudo chown -R yourusername:yourusername /home/yourusername/Cassette_Tracking
+sudo chown -R atcpl:atcpl /home/atcpl/Cassette_Tracking
 
 # Restrict permissions
-chmod 755 /home/yourusername/Cassette_Tracking
-chmod 644 /home/yourusername/Cassette_Tracking/database/*.db
+chmod 755 /home/atcpl/Cassette_Tracking
+chmod 644 /home/atcpl/Cassette_Tracking/database/*.db
 ```
 
 ### 3. Use Environment Variables
