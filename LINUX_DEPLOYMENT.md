@@ -136,8 +136,10 @@ pip install gunicorn
 
 ### Step 3: Create Systemd Service File
 ```bash
-sudo nano /etc/systemd/system/cassette-tracking.service
+sudo vi /etc/systemd/system/cassette-tracking.service
+cygnus-035840:/lib/systemd/system$ cat general-custom.service
 ```
+
 
 **Add the following content** (adjust paths to match your setup):
 
