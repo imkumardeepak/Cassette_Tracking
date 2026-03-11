@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import or_
 from fastapi import HTTPException
 from typing import Optional, List
 from app import models, schemas
@@ -13,7 +14,7 @@ def get_cassette(db: Session, cassette_id: int):
         raise HTTPException(status_code=404, detail=f"Cassette with id {cassette_id} not found")
     return cassette
 
-def get_cassettes(db: Session, skip: int = 0, limit: int = 10):
+def get_cassettes(db: Session, skip: int = 0, limit: int = 100):
     """Get all cassettes with pagination"""
     total = db.query(models.CassetteMaster).count()
     items = db.query(models.CassetteMaster).offset(skip).limit(limit).all()
@@ -25,12 +26,10 @@ def get_cassette_by_code(db: Session, cassette_code: str):
 
 def create_cassette(db: Session, cassette: schemas.CassetteCreate):
     """Create new cassette"""
-    # Check if cassette code already exists
     existing = get_cassette_by_code(db, cassette.cassette_code)
     if existing:
         raise HTTPException(status_code=400, detail=f"Cassette with code '{cassette.cassette_code}' already exists")
     
-    # Check if RFID is already assigned to another cassette
     if cassette.rfid_number:
         existing_rfid = get_cassette_by_rfid(db, cassette.rfid_number)
         if existing_rfid:
@@ -54,13 +53,11 @@ def update_cassette(db: Session, cassette_id: int, cassette: schemas.CassetteUpd
     """Update cassette"""
     db_cassette = get_cassette(db, cassette_id)
     
-    # Check if new code conflicts with existing cassette
     if cassette.cassette_code and cassette.cassette_code != db_cassette.cassette_code:
         existing = get_cassette_by_code(db, cassette.cassette_code)
         if existing:
             raise HTTPException(status_code=400, detail=f"Cassette with code '{cassette.cassette_code}' already exists")
     
-    # Check if RFID is already assigned to another cassette
     if cassette.rfid_number and cassette.rfid_number != db_cassette.rfid_number:
         existing_rfid = get_cassette_by_rfid(db, cassette.rfid_number)
         if existing_rfid and existing_rfid.id != cassette_id:
@@ -70,7 +67,6 @@ def update_cassette(db: Session, cassette_id: int, cassette: schemas.CassetteUpd
             )
     
     try:
-        # Only update fields that are provided (not None)
         update_data = cassette.model_dump(exclude_unset=True)
         for key, value in update_data.items():
             setattr(db_cassette, key, value)
@@ -108,12 +104,12 @@ def get_cassette_by_rfid(db: Session, rfid_number: str):
     return db.query(models.CassetteMaster).filter(models.CassetteMaster.rfid_number == rfid_number).first()
 
 
-# ============= RFID Transaction CRUD =============
+# ============= RFID Transaction CRUD (Paired) =============
 
 def create_rfid_transaction(db: Session, transaction: schemas.RFIDTransactionCreate):
-    """Create a new RFID transaction record"""
+    """Create a new RFID transaction record for a cassette pair"""
     try:
-        db_transaction = models.RFIDTransaction(**transaction.dict())
+        db_transaction = models.RFIDTransaction(**transaction.model_dump())
         db.add(db_transaction)
         db.commit()
         db.refresh(db_transaction)
@@ -129,9 +125,12 @@ def get_rfid_transactions(db: Session, skip: int = 0, limit: int = 50):
     return {"total": total, "items": items}
 
 def get_rfid_transactions_by_rfid(db: Session, rfid_number: str):
-    """Get all transactions for a specific RFID"""
+    """Get all transactions containing a specific RFID (in either rfid1 or rfid2)"""
     return db.query(models.RFIDTransaction).filter(
-        models.RFIDTransaction.rfid_number == rfid_number
+        or_(
+            models.RFIDTransaction.rfid1 == rfid_number,
+            models.RFIDTransaction.rfid2 == rfid_number
+        )
     ).order_by(models.RFIDTransaction.created_at.desc()).all()
 
 def get_recent_rfid_transactions(db: Session, limit: int = 10):
@@ -141,17 +140,21 @@ def get_recent_rfid_transactions(db: Session, limit: int = 10):
     ).limit(limit).all()
 
 
-# ============= Production Log CRUD =============
+# ============= Production Log CRUD (Paired) =============
 
 def create_production_log(db: Session, log_data: schemas.ProductionLogCreate):
-    """Create a new production log entry (auto-created when new RFID detected)"""
+    """Create a new production log entry for a cassette pair"""
     try:
         from datetime import datetime
         db_log = models.ProductionLog(
-            cassette_id=log_data.cassette_id,
-            cassette_code=log_data.cassette_code,
-            rfid_number=log_data.rfid_number,
-            relay_output=log_data.relay_output,
+            cassette1_id=log_data.cassette1_id,
+            cassette1_code=log_data.cassette1_code,
+            rfid1=log_data.rfid1,
+            cassette2_id=log_data.cassette2_id,
+            cassette2_code=log_data.cassette2_code,
+            rfid2=log_data.rfid2,
+            relay1_output=log_data.relay1_output,
+            relay2_output=log_data.relay2_output,
             from_date=log_data.from_date or datetime.now(),
             status="open"
         )
@@ -165,7 +168,7 @@ def create_production_log(db: Session, log_data: schemas.ProductionLogCreate):
 
 
 def close_open_production_logs(db: Session):
-    """Close all currently open production logs (set to_date = now, status = closed)"""
+    """Close all currently open production logs"""
     from datetime import datetime
     open_logs = db.query(models.ProductionLog).filter(
         models.ProductionLog.status == "open"
@@ -179,6 +182,36 @@ def close_open_production_logs(db: Session):
     return len(open_logs)
 
 
+def get_open_production_log_by_pair(db: Session, rfid1: str, rfid2: str):
+    """Get the open production log for a specific RFID pair (order-independent)"""
+    return db.query(models.ProductionLog).filter(
+        models.ProductionLog.status == "open",
+        or_(
+            (models.ProductionLog.rfid1 == rfid1) & (models.ProductionLog.rfid2 == rfid2),
+            (models.ProductionLog.rfid1 == rfid2) & (models.ProductionLog.rfid2 == rfid1)
+        )
+    ).first()
+
+
+def close_production_logs_by_pair(db: Session, rfid1: str, rfid2: str):
+    """Close open production logs for a specific RFID pair"""
+    from datetime import datetime
+    open_logs = db.query(models.ProductionLog).filter(
+        models.ProductionLog.status == "open",
+        or_(
+            (models.ProductionLog.rfid1 == rfid1) & (models.ProductionLog.rfid2 == rfid2),
+            (models.ProductionLog.rfid1 == rfid2) & (models.ProductionLog.rfid2 == rfid1)
+        )
+    ).all()
+    
+    for log in open_logs:
+        log.to_date = datetime.now()
+        log.status = "closed"
+    
+    db.commit()
+    return len(open_logs) > 0
+
+
 def update_production_log(db: Session, log_id: int, log_data: schemas.ProductionLogUpdate):
     """Update production log with user-entered data (sheet_length_cut, coil_length_run)"""
     db_log = db.query(models.ProductionLog).filter(models.ProductionLog.id == log_id).first()
@@ -188,7 +221,7 @@ def update_production_log(db: Session, log_id: int, log_data: schemas.Production
     if db_log.status == "open":
         raise HTTPException(
             status_code=400, 
-            detail="Cannot update data for an active cassette session. Wait until the cassette is changed."
+            detail="Cannot update data for an active cassette session. Wait until the cassette pair is changed."
         )    
     try:
         update_data = log_data.model_dump(exclude_unset=True)
@@ -219,37 +252,6 @@ def get_production_log(db: Session, log_id: int):
     if not log:
         raise HTTPException(status_code=404, detail=f"Production log with id {log_id} not found")
     return log
-
-
-def get_open_production_log(db: Session):
-    """Get the currently open production log (if any)"""
-    return db.query(models.ProductionLog).filter(
-        models.ProductionLog.status == "open"
-    ).first()
-
-
-def get_open_production_log_by_rfid(db: Session, rfid_number: str):
-    """Get the open production log for a specific RFID number"""
-    return db.query(models.ProductionLog).filter(
-        models.ProductionLog.rfid_number == rfid_number,
-        models.ProductionLog.status == "open"
-    ).first()
-
-
-def close_production_logs_by_rfid(db: Session, rfid_number: str):
-    """Close open production logs for a specific RFID (set to_date = now, status = closed)"""
-    from datetime import datetime
-    open_logs = db.query(models.ProductionLog).filter(
-        models.ProductionLog.rfid_number == rfid_number,
-        models.ProductionLog.status == "open"
-    ).all()
-    
-    for log in open_logs:
-        log.to_date = datetime.now()
-        log.status = "closed"
-    
-    db.commit()
-    return len(open_logs) > 0
 
 
 def delete_production_log(db: Session, log_id: int):
