@@ -259,11 +259,17 @@ async def delete_production_log(log_id: int, db: Session = Depends(get_db)):
     return crud.delete_production_log(db, log_id)
 
 @app.delete("/api/cleanup-logs-and-transactions", tags=["System Maintenance"])
-async def cleanup_database(db: Session = Depends(get_db)):
+async def cleanup_database(
+    password: str = Query(..., description="Admin password required for this operation"),
+    db: Session = Depends(get_db)
+):
     """
     WARNING: This endpoint will delete ALL Production Logs and RFID Transactions.
     It is intended for development and cleanup purposes.
+    Requires admin password.
     """
+    if password != config.ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid admin password")
     return crud.truncate_logs_and_transactions(db)
 
 

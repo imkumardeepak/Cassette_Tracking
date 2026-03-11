@@ -1,19 +1,21 @@
 """
 RFID Background Service
-Continuously monitors RFID reader for new tags
-Integrates with Modbus RTU relay controller for hardware output control
+Continuously monitors RFID reader for new tags.
+Supports PAIR detection — processes multiple RFID tags simultaneously.
+Integrates with Modbus RTU relay controller for hardware output control.
 
 Working Flow:
 1. Background loop runs every `read_interval` seconds (default 5s)
 2. Sends READ command to RFID reader via TCP
-3. If a tag is detected:
-   a. Check if it's a NEW tag (not seen within cooldown period)
-   b. If NEW → look up cassette in DB → trigger mapped relay ON → insert transaction → send WebSocket notification
-   c. If SAME tag still present → keep relay ON (reset auto-off timer), do NOT insert duplicate transaction
-4. If NO tag detected:
-   a. Turn OFF any active relay
-   b. Clear current RFID (but keep it in recent_rfids for cooldown)
-5. Auto-off: If relay has been ON for `output_duration` seconds without RFID refresh, turn it OFF
+3. If tag(s) detected:
+   a. Check each tag — is it NEW (not seen within cooldown)?
+   b. For NEW tags → look up cassette → trigger relay → create production log + transaction → WS notification
+   c. For SAME tags still present → keep relays ON (refresh timers)
+   d. For tags REMOVED since last read → turn OFF their relays → close production log
+4. If NO tags detected:
+   a. Turn OFF all active relays
+   b. Close all open production logs for those RFIDs
+5. Auto-off: If a relay has been ON for `output_duration` seconds without refresh, turn it OFF
 """
 
 import asyncio
@@ -24,105 +26,96 @@ from app.gpio_controller import gpio_controller
 
 logger = logging.getLogger(__name__)
 
+
 class RFIDBackgroundService:
     def __init__(self, read_interval=5):
         """
-        Initialize RFID background service
+        Initialize RFID background service with pair support.
         
         Args:
             read_interval (int): Interval in seconds between RFID reads
         """
         self.read_interval = read_interval
         self.is_running = False
-        self.last_rfid = None
+        self.last_rfids = set()        # Set of currently detected RFID tags (supports pairs)
         self.last_read_time = None
         self.read_count = 0
         self.error_count = 0
         
-        # Relay auto-off tracking
-        self.active_output = None  # Currently active relay output
-        self.output_trigger_time = None  # When the output was triggered
-        self.output_duration = 5  # Seconds to keep relay ON
+        # Relay auto-off tracking (supports multiple simultaneous outputs)
+        # Format: {rfid_number: {'output': str, 'time': datetime}}
+        self.active_outputs = {}
+        self.output_duration = 5       # Seconds to keep relay ON
         
         # Duplicate prevention: track recently scanned RFIDs with timestamps
-        # Only insert a transaction if the RFID hasn't been seen within cooldown_seconds
-        self.recent_rfids = {}  # {rfid_number: last_seen_datetime}
-        self.cooldown_seconds = 30  # Don't re-log same RFID within 30 seconds
+        self.recent_rfids = {}         # {rfid_number: last_seen_datetime}
+        self.cooldown_seconds = 30     # Don't re-log same RFID within 30 seconds
         
         # Initialize relay controller
         gpio_controller.initialize()
-        
+
     async def start(self):
         """Start the background RFID reading service"""
-        if self.is_running:
-            logger.warning("RFID service is already running")
-            return
-            
         self.is_running = True
-        logger.info(f"🚀 RFID Background Service started (interval: {self.read_interval}s, cooldown: {self.cooldown_seconds}s)")
+        logger.info(f"🔄 Starting RFID Background Service (interval: {self.read_interval}s)...")
         
         while self.is_running:
             try:
                 await self._read_and_process()
-                await asyncio.sleep(self.read_interval)
-            except asyncio.CancelledError:
-                logger.info("RFID service cancelled")
-                break
             except Exception as e:
-                logger.error(f"Error in RFID service: {e}")
+                logger.error(f"Error in RFID service loop: {e}")
                 self.error_count += 1
-                await asyncio.sleep(self.read_interval)
-    
-    def _is_new_rfid(self, rfid_number: str) -> bool:
-        """
-        Check if an RFID tag should be treated as a NEW scan.
-        Returns True only if the RFID hasn't been seen within the cooldown period.
-        This prevents duplicate transactions when a tag is removed and re-placed.
-        """
-        now = datetime.now()
-        
-        # Clean up old entries (older than cooldown)
-        expired = [k for k, v in self.recent_rfids.items() 
-                   if (now - v).total_seconds() > self.cooldown_seconds]
-        for k in expired:
-            del self.recent_rfids[k]
-        
-        # Check if this RFID was recently seen
-        if rfid_number in self.recent_rfids:
-            elapsed = (now - self.recent_rfids[rfid_number]).total_seconds()
-            logger.debug(f"RFID {rfid_number} was seen {elapsed:.1f}s ago (cooldown: {self.cooldown_seconds}s)")
-            return False  # Not new — within cooldown
-        
-        return True  # Genuinely new RFID
-    
-    def _mark_rfid_seen(self, rfid_number: str):
-        """Mark an RFID as recently seen (resets cooldown timer)"""
-        self.recent_rfids[rfid_number] = datetime.now()
+            
+            await asyncio.sleep(self.read_interval)
 
-    async def _check_and_auto_off_output(self):
-        """Check if active output should be turned off (after output_duration seconds)"""
-        if self.active_output and self.output_trigger_time:
-            elapsed = (datetime.now() - self.output_trigger_time).total_seconds()
+    def _is_new_rfid(self, rfid_number: str) -> bool:
+        """Check if this RFID has been seen recently (within cooldown period)"""
+        if rfid_number not in self.recent_rfids:
+            return True
+        
+        last_seen = self.recent_rfids[rfid_number]
+        elapsed = (datetime.now() - last_seen).total_seconds()
+        return elapsed > self.cooldown_seconds
+
+    def _mark_rfid_seen(self, rfid_number: str):
+        """Mark an RFID as recently seen (for cooldown tracking)"""
+        self.recent_rfids[rfid_number] = datetime.now()
+        
+        # Cleanup old entries (older than 5 minutes)
+        cutoff = datetime.now()
+        expired = [
+            rfid for rfid, ts in self.recent_rfids.items()
+            if (cutoff - ts).total_seconds() > 300
+        ]
+        for rfid in expired:
+            del self.recent_rfids[rfid]
+
+    async def _check_and_auto_off_outputs(self):
+        """Check if any active outputs should be turned off (after output_duration seconds)"""
+        expired = []
+        for rfid, output_info in self.active_outputs.items():
+            elapsed = (datetime.now() - output_info['time']).total_seconds()
             if elapsed >= self.output_duration:
-                # Turn off the output
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     None,
                     gpio_controller.set_output,
-                    self.active_output,
+                    output_info['output'],
                     0  # OFF
                 )
-                logger.info(f"⏱️ Relay {self.active_output} auto-OFF after {self.output_duration}s")
-                self.active_output = None
-                self.output_trigger_time = None
-    
+                logger.info(f"⏱️ Relay {output_info['output']} auto-OFF after {self.output_duration}s")
+                expired.append(rfid)
+        
+        for rfid in expired:
+            del self.active_outputs[rfid]
+
     async def _read_and_process(self):
-        """Read RFID tag and process it"""
+        """Read RFID tags and process all detected tags (supports pairs)"""
         try:
-            # Check if we need to auto-turn-off the output
-            await self._check_and_auto_off_output()
+            # Check auto-off for all active outputs
+            await self._check_and_auto_off_outputs()
             
-            # Run blocking RFID read in executor to avoid blocking event loop
+            # Read RFID tags from hardware
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, read_rfid_tag)
             
@@ -130,144 +123,126 @@ class RFIDBackgroundService:
             current_time = datetime.now()
             
             if result['success']:
-                rfid_number = result['rfid_number']
+                # Get ALL detected tags (pair support)
+                detected_rfids = set(result.get('rfid_numbers', [result['rfid_number']]))
+                previous_rfids = self.last_rfids.copy()
                 
-                # Check if this is a genuinely NEW RFID (not seen within cooldown)
-                is_new = self._is_new_rfid(rfid_number)
-                is_different = rfid_number != self.last_rfid
+                # ── Tags REMOVED (were present before, now gone) ──
+                gone_rfids = previous_rfids - detected_rfids
+                for rfid in gone_rfids:
+                    # Turn off relay for removed tag
+                    if rfid in self.active_outputs:
+                        output_info = self.active_outputs[rfid]
+                        await loop.run_in_executor(
+                            None, gpio_controller.set_output, output_info['output'], 0
+                        )
+                        logger.info(f"📴 Relay {output_info['output']} OFF (RFID {rfid[:16]}... removed)")
+                        del self.active_outputs[rfid]
+                    # Close production log for removed RFID
+                    await self._on_rfid_removed(rfid)
                 
-                if is_new and is_different:
-                    # ── GENUINELY NEW RFID ──
-                    logger.info(f"📡 New RFID detected: {rfid_number}")
-                    self.last_rfid = rfid_number
-                    self.last_read_time = current_time
-                    self._mark_rfid_seen(rfid_number)
+                # ── Process each detected tag ──
+                for rfid_number in detected_rfids:
+                    is_new = self._is_new_rfid(rfid_number)
+                    is_different = rfid_number not in previous_rfids
                     
-                    # Turn off previous output before triggering new one
-                    if self.active_output:
-                        await loop.run_in_executor(
-                            None,
-                            gpio_controller.set_output,
-                            self.active_output,
-                            0  # OFF
-                        )
-                        logger.info(f"🔄 Relay {self.active_output} OFF (new RFID detected)")
-                    
-                    # Trigger relay output based on RFID
-                    triggered_output = await self._trigger_gpio(rfid_number)
-                    
-                    # Track the active output for auto-off
-                    if triggered_output:
-                        self.active_output = triggered_output
-                        self.output_trigger_time = current_time
-                    
-                    # Process RFID — INSERT transaction record + send notifications
-                    await self._on_rfid_detected(rfid_number, triggered_output)
-                    
-                elif is_different and not is_new:
-                    # ── SAME RFID RE-PLACED WITHIN COOLDOWN ──
-                    # Trigger relay again but do NOT insert duplicate transaction
-                    logger.info(f"🔄 RFID {rfid_number} re-detected within cooldown — relay only, no transaction")
-                    self.last_rfid = rfid_number
-                    self.last_read_time = current_time
-                    self._mark_rfid_seen(rfid_number)
-                    
-                    # Turn off previous output
-                    if self.active_output:
-                        await loop.run_in_executor(
-                            None,
-                            gpio_controller.set_output,
-                            self.active_output,
-                            0
-                        )
-                    
-                    # Trigger relay
-                    triggered_output = await self._trigger_gpio(rfid_number)
-                    if triggered_output:
-                        self.active_output = triggered_output
-                        self.output_trigger_time = current_time
-                else:
-                    # ── SAME RFID STILL PRESENT (continuous read) ──
-                    # Just keep the relay ON, refresh the auto-off timer
-                    if self.active_output:
-                        self.output_trigger_time = current_time
-                    self._mark_rfid_seen(rfid_number)
-                    
+                    if is_new and is_different:
+                        # ── GENUINELY NEW RFID ──
+                        logger.info(f"📡 New RFID detected: {rfid_number}")
+                        self._mark_rfid_seen(rfid_number)
+                        
+                        # Trigger relay output
+                        triggered_output = await self._trigger_gpio(rfid_number)
+                        if triggered_output:
+                            self.active_outputs[rfid_number] = {
+                                'output': triggered_output,
+                                'time': current_time
+                            }
+                        
+                        # Process — create production log + transaction + WS notification
+                        await self._on_rfid_detected(rfid_number, triggered_output)
+                        
+                    elif is_different and not is_new:
+                        # ── RE-PLACED WITHIN COOLDOWN — relay only, no new transaction ──
+                        logger.info(f"🔄 RFID {rfid_number[:16]}... re-detected within cooldown — relay only")
+                        self._mark_rfid_seen(rfid_number)
+                        
+                        triggered_output = await self._trigger_gpio(rfid_number)
+                        if triggered_output:
+                            self.active_outputs[rfid_number] = {
+                                'output': triggered_output,
+                                'time': current_time
+                            }
+                    else:
+                        # ── SAME RFID STILL PRESENT — refresh timer ──
+                        if rfid_number in self.active_outputs:
+                            self.active_outputs[rfid_number]['time'] = current_time
+                        self._mark_rfid_seen(rfid_number)
+                
+                # Update state
+                self.last_rfids = detected_rfids
+                self.last_read_time = current_time
+                
+                if len(detected_rfids) > 1:
+                    logger.info(f"📡 Pair detected: {len(detected_rfids)} tags — {', '.join(list(detected_rfids)[:3])}")
+                
             else:
-                # No tag detected - turn off active relay
-                if self.active_output:
-                    await loop.run_in_executor(
-                        None,
-                        gpio_controller.set_output,
-                        self.active_output,
-                        0  # OFF
-                    )
-                    logger.info(f"📴 Relay {self.active_output} OFF (no RFID tag)")
-                    self.active_output = None
-                    self.output_trigger_time = None
+                # No tags detected — turn off all active relays and close logs
+                if self.active_outputs:
+                    for rfid, output_info in list(self.active_outputs.items()):
+                        await loop.run_in_executor(
+                            None, gpio_controller.set_output, output_info['output'], 0
+                        )
+                        logger.info(f"📴 Relay {output_info['output']} OFF (no RFID tags)")
+                        # Close production log for this RFID
+                        await self._on_rfid_removed(rfid)
+                    self.active_outputs.clear()
                 
-                # Clear current RFID (but recent_rfids keeps the cooldown active)
-                self.last_rfid = None
+                self.last_rfids.clear()
                 
-                # Only log occasionally to avoid spam
-                if self.read_count % 12 == 0:  # Log every minute (12 * 5 seconds)
+                if self.read_count % 12 == 0:
                     logger.debug(f"RFID reader status: {result['message']}")
-                    
+                
         except Exception as e:
             logger.error(f"Error reading RFID: {e}")
             self.error_count += 1
-    
+
     async def _trigger_gpio(self, rfid_number: str) -> str:
         """
-        Trigger relay output based on RFID number
-        Uses mapping from database (gpio_output field in CassetteMaster)
-        
-        Args:
-            rfid_number: The detected RFID number
-            
-        Returns:
-            The output name that was triggered, or None
+        Trigger GPIO output for a detected RFID tag.
+        Returns the output name that was triggered, or None.
         """
         try:
-            loop = asyncio.get_event_loop()
-            
-            # First get the output mapping from database
-            output_name = await loop.run_in_executor(
-                None, 
-                gpio_controller.get_output_for_rfid, 
-                rfid_number
-            )
+            # Check if this RFID has a relay mapping
+            output_name = gpio_controller.get_mapped_output(rfid_number)
             
             if output_name:
-                # Trigger the output
-                success = await loop.run_in_executor(
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
                     None,
                     gpio_controller.set_output,
                     output_name,
-                    1  # HIGH
+                    1  # ON
                 )
-                
-                if success:
-                    logger.info(f"⚡ Relay {output_name} triggered ON for RFID {rfid_number}")
-                    return output_name
-                    
-            return None
+                logger.info(f"⚡ Relay {output_name} ON for RFID {rfid_number[:16]}...")
+                return output_name
+            else:
+                logger.debug(f"No relay mapping found for RFID {rfid_number[:16]}...")
+                return None
         except Exception as e:
-            logger.error(f"Error triggering relay: {e}")
+            logger.error(f"Error triggering GPIO for RFID {rfid_number}: {e}")
             return None
-    
+
     async def _on_rfid_detected(self, rfid_number: str, triggered_output: str = None):
         """
-        Called when a new RFID tag is detected.
+        Called when a genuinely new RFID tag is detected.
         
-        ONLY processes RFIDs that are assigned in Cassette Master.
-        Unassigned/unknown RFIDs are ignored (no transaction, no production log).
+        For assigned RFIDs (in Cassette Master):
+        1. Check if there's already an open production log for THIS specific RFID
+        2. If not, create a new production log + RFID transaction  
+        3. Send WebSocket notifications
         
-        For assigned RFIDs:
-        1. Close any open production log (sets to_date = now)
-        2. Create a new production log (from_date = now, status = open)
-        3. Insert RFID transaction record
-        4. Send WebSocket notifications
+        For unassigned RFIDs: send warning via WebSocket only.
         """
         from app.database import SessionLocal
         from app import crud, schemas
@@ -277,15 +252,13 @@ class RFIDBackgroundService:
         db = SessionLocal()
         
         try:
-            # Check if RFID is assigned to a cassette in master table
+            # Look up cassette by RFID
             cassette = crud.get_cassette_by_rfid(db, rfid_number)
             
             if not cassette:
-                # ── UNASSIGNED RFID — SKIP completely ──
-                # No transaction record, no production log
-                logger.warning(f"⚠️ RFID {rfid_number} not found in Cassette Master — skipping (no records saved)")
+                # Unassigned RFID — warn only, no DB records
+                logger.warning(f"⚠️ RFID {rfid_number} not found in Cassette Master — skipping")
                 
-                # Only send WebSocket notification so UI shows warning
                 await ws_manager.broadcast_rfid_scan(
                     rfid_number=rfid_number,
                     cassette_code=None,
@@ -297,23 +270,13 @@ class RFIDBackgroundService:
                     message=f"RFID {rfid_number[:16]}... not assigned to any cassette",
                     notification_type="warning"
                 )
-                return  # ← EXIT: no DB records for unassigned RFIDs
+                return
             
-            # ── ASSIGNED RFID — FULL PROCESSING ──
-            
-            # 1. Check currently open production log
-            open_log = crud.get_open_production_log(db)
-            log_id = None
-            
-            if open_log and open_log.rfid_number != rfid_number:
-                # Close it because it's a different RFID
-                closed_count = crud.close_open_production_logs(db)
-                if closed_count > 0:
-                    logger.info(f"📋 Closed {closed_count} open production log(s)")
-                open_log = None
+            # Check if there's already an open production log for THIS specific RFID
+            open_log = crud.get_open_production_log_by_rfid(db, rfid_number)
             
             if not open_log:
-                # 2. Create a new production log for this cassette session
+                # Create new production log for this cassette session
                 log_data = schemas.ProductionLogCreate(
                     cassette_id=cassette.id,
                     cassette_code=cassette.cassette_code,
@@ -325,7 +288,7 @@ class RFIDBackgroundService:
                 log_id = new_log.id
                 logger.info(f"📋 Production log #{new_log.id} opened for cassette {cassette.cassette_code}")
                 
-                # 3. Create RFID transaction record ONLY ONCE per session switch
+                # Create RFID transaction record
                 extra_info = {"desc": cassette.desc, "production_log_id": log_id}
                 if triggered_output:
                     extra_info["relay_output"] = triggered_output
@@ -336,64 +299,77 @@ class RFIDBackgroundService:
                     cassette_code=cassette.cassette_code,
                     event_type="scan",
                     status="success",
-                    message=f"Cassette {cassette.cassette_code} scanned" + 
+                    message=f"Cassette {cassette.cassette_code} scanned" +
                             (f" → {triggered_output} ON" if triggered_output else ""),
                     extra_data=json.dumps(extra_info)
                 )
                 crud.create_rfid_transaction(db, transaction_data)
             else:
                 log_id = open_log.id
-                logger.info(f"📋 Keeping open production log #{log_id} active for cassette {cassette.cassette_code}")
+                logger.debug(f"📋 Keeping open production log #{log_id} for cassette {cassette.cassette_code}")
             
-            # 4. Send WebSocket notifications
+            # Send WebSocket notifications
             await ws_manager.broadcast_rfid_scan(
                 rfid_number=rfid_number,
                 cassette_code=cassette.cassette_code,
                 status="success",
-                message=f"Cassette {cassette.cassette_code} scanned" + 
+                message=f"Cassette {cassette.cassette_code} scanned" +
                         (f" → {triggered_output}" if triggered_output else "")
             )
             await ws_manager.broadcast_notification(
                 title="RFID Scanned",
-                message=f"Cassette '{cassette.cassette_code}' detected" + 
+                message=f"Cassette '{cassette.cassette_code}' detected" +
                         (f" → {triggered_output} ON" if triggered_output else ""),
                 notification_type="success"
             )
             
-            logger.info(f"✅ RFID {rfid_number} → cassette {cassette.cassette_code}" + 
-                       (f" → {triggered_output} ON" if triggered_output else ""))
-                
         except Exception as e:
             logger.error(f"Error processing RFID detection: {e}")
-                
         finally:
             db.close()
-    
+
+    async def _on_rfid_removed(self, rfid_number: str):
+        """Called when an RFID tag is no longer detected. Closes its production log."""
+        from app.database import SessionLocal
+        from app import crud
+        
+        db = SessionLocal()
+        try:
+            closed = crud.close_production_logs_by_rfid(db, rfid_number)
+            if closed:
+                logger.info(f"📋 Production log closed for RFID {rfid_number[:16]}... (tag removed)")
+        except Exception as e:
+            logger.error(f"Error closing production log for removed RFID: {e}")
+        finally:
+            db.close()
+
     def configure_rfid_gpio_mapping(self, rfid_number: str, output_name: str):
         """
-        Configure RFID to GPIO output mapping
-        
-        Args:
-            rfid_number: The RFID tag number
-            output_name: Output name (DO0, DO1, DO2, DO3)
+        Configure a mapping between an RFID tag and a relay output.
+        When this RFID is detected, the specified relay will be activated.
         """
         gpio_controller.configure_rfid_mapping(rfid_number, output_name)
-    
+
     def stop(self):
-        """Stop the background service"""
-        logger.info("🛑 Stopping RFID Background Service...")
+        """Stop the background RFID reading service"""
         self.is_running = False
+        logger.info("🛑 Stopping RFID Background Service...")
         gpio_controller.cleanup()
-    
+
     def get_status(self):
-        """Get service status"""
+        """Get the current status of the RFID service"""
         gpio_status = gpio_controller.get_status()
         
-        # Calculate remaining time if output is active
-        remaining_seconds = None
-        if self.active_output and self.output_trigger_time:
-            elapsed = (datetime.now() - self.output_trigger_time).total_seconds()
-            remaining_seconds = max(0, self.output_duration - elapsed)
+        # Build active output details
+        active_output_details = {}
+        for rfid, info in self.active_outputs.items():
+            elapsed = (datetime.now() - info['time']).total_seconds()
+            active_output_details[info['output']] = {
+                'rfid': rfid,
+                'remaining_seconds': max(0, self.output_duration - elapsed)
+            }
+        
+        last_rfids_list = list(self.last_rfids)
         
         return {
             "is_running": self.is_running,
@@ -401,11 +377,13 @@ class RFIDBackgroundService:
             "cooldown_seconds": self.cooldown_seconds,
             "total_reads": self.read_count,
             "error_count": self.error_count,
-            "last_rfid": self.last_rfid,
+            "last_rfid": last_rfids_list[0] if last_rfids_list else None,   # backward compat
+            "last_rfids": last_rfids_list,                                   # all detected tags
             "last_read_time": self.last_read_time.isoformat() if self.last_read_time else None,
-            "active_output": self.active_output,
+            "active_output": list(active_output_details.keys())[0] if active_output_details else None,
+            "active_outputs": active_output_details,
             "output_duration": self.output_duration,
-            "output_remaining_seconds": remaining_seconds,
+            "output_remaining_seconds": None,
             "recent_rfids_count": len(self.recent_rfids),
             "gpio": gpio_status
         }

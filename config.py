@@ -42,3 +42,6 @@ MODBUS_SLAVE_ID = int(os.getenv("MODBUS_SLAVE_ID", "1"))     # Slave address (1-
 MODBUS_TIMEOUT = int(os.getenv("MODBUS_TIMEOUT", "1"))       # Timeout in seconds
 MODBUS_RELAY_COUNT = 8                                        # Number of relay outputs to use (out of 10 available)
 
+# Admin Authentication
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Aarkay@1234")   # Password for destructive operations
+

@@ -228,6 +228,30 @@ def get_open_production_log(db: Session):
     ).first()
 
 
+def get_open_production_log_by_rfid(db: Session, rfid_number: str):
+    """Get the open production log for a specific RFID number"""
+    return db.query(models.ProductionLog).filter(
+        models.ProductionLog.rfid_number == rfid_number,
+        models.ProductionLog.status == "open"
+    ).first()
+
+
+def close_production_logs_by_rfid(db: Session, rfid_number: str):
+    """Close open production logs for a specific RFID (set to_date = now, status = closed)"""
+    from datetime import datetime
+    open_logs = db.query(models.ProductionLog).filter(
+        models.ProductionLog.rfid_number == rfid_number,
+        models.ProductionLog.status == "open"
+    ).all()
+    
+    for log in open_logs:
+        log.to_date = datetime.now()
+        log.status = "closed"
+    
+    db.commit()
+    return len(open_logs) > 0
+
+
 def delete_production_log(db: Session, log_id: int):
     """Delete a production log"""
     db_log = db.query(models.ProductionLog).filter(models.ProductionLog.id == log_id).first()

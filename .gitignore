@@ -47,3 +47,4 @@ frontend/yarn-error.log*
 # Old templates and static files (no longer used)
 templates/
 static/
+.agent/

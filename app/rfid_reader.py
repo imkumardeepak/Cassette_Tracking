@@ -91,14 +91,13 @@ def read_rfid_tag():
                     rfid_tags.append(line)
         
         if rfid_tags:
-            # Return the first RFID tag
-            rfid_number = rfid_tags[0]
-            logger.info(f"✅ RFID tag read successfully: {rfid_number}")
+            logger.info(f"✅ {len(rfid_tags)} RFID tag(s) read: {rfid_tags}")
             return {
                 'success': True,
-                'rfid_number': rfid_number,
-                'message': f'RFID tag read successfully',
-                'all_tags': rfid_tags  # In case multiple tags detected
+                'rfid_number': rfid_tags[0],       # Backward compatibility
+                'rfid_numbers': rfid_tags,          # All detected tags (pair support)
+                'message': f'{len(rfid_tags)} RFID tag(s) read successfully',
+                'all_tags': rfid_tags
             }
         else:
             return {

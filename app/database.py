@@ -26,7 +26,7 @@ def get_db():
 # Initialize database
 def init_db():
     """Create all tables in the database"""
-    from app.models import CassetteMaster, RFIDTransaction
+    from app.models import CassetteMaster, RFIDTransaction, ProductionLog
     Base.metadata.create_all(bind=engine)
     print("Database initialized successfully!")
 
